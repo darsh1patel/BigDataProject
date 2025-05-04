@@ -18,7 +18,6 @@ import matplotlib.pyplot as plt
 import uuid
 from cassandra.query import SimpleStatement
 import csv
-
 # Setup secure connection bundle path
 cloud_config = {
     'secure_connect_bundle': '/content/secure-connect-final-project (1).zip'
@@ -155,26 +154,17 @@ with open('/content/cancer_patient..csv', 'r', encoding='utf-8') as f:
         session.execute(batch)
         print(f"✅ Inserted final {count % batch_size} rows...")
 
-print(f"🎉 Done inserting {count} rows.")
+print(f" Done inserting {count} rows.")
 
 
 
-# Create clean table (Silver Layer)
+# Create simplified Silver table
 session.execute('''
     CREATE TABLE IF NOT EXISTS cancer_patients_clean (
         Patient_ID text PRIMARY KEY,
-        Age int,
-        Gender text,
-        Country_Region text,
-        Year int,
-        Genetic_Risk float,
-        Air_Pollution float,
-        Alcohol_Use float,
-        Smoking float,
-        Obesity_Level float,
         Cancer_Type text,
-        Cancer_Stage text,
-        Treatment_Cost_USD float,
+        Country_Region text,
+        Gender text,
         Survival_Years float,
         Target_Severity_Score float
     )
@@ -183,55 +173,66 @@ session.execute('''
 # Prepare insert statement
 insert_stmt = session.prepare('''
     INSERT INTO cancer_patients_clean (
-        Patient_ID, Age, Gender, Country_Region, Year,
-        Genetic_Risk, Air_Pollution, Alcohol_Use, Smoking, Obesity_Level,
-        Cancer_Type, Cancer_Stage, Treatment_Cost_USD, Survival_Years, Target_Severity_Score
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        Patient_ID, Cancer_Type, Country_Region, Gender, Survival_Years, Target_Severity_Score
+    ) VALUES (?, ?, ?, ?, ?, ?)
 ''')
 
-# Function to validate row
+# Filter and validation function
 def is_valid(row):
     try:
-        required_fields = [row.patient_id, row.gender, row.country_region, row.cancer_type, row.cancer_stage]
-        int(row.age)
-        int(row.year)
-        float(row.genetic_risk)
-        float(row.air_pollution)
-        float(row.alcohol_use)
-        float(row.smoking)
-        float(row.obesity_level)
-        float(row.treatment_cost_usd)
-        float(row.survival_years)
-        float(row.target_severity_score)
-        return all(required_fields)
-    except (ValueError, TypeError):
+        # Mandatory fields
+        required_fields = [row.patient_id, row.cancer_type, row.country_region, row.gender]
+        if not all(required_fields):
+            return False
+
+        # Numeric sanity checks
+        if row.survival_years is None or not (0 <= row.survival_years <= 100):
+            return False
+        if row.target_severity_score is None or not (0.0 <= row.target_severity_score <= 1.0):
+            return False
+
+        # Optional filtering: only severity > 0.5
+        if row.target_severity_score <= 0.5:
+            return False
+
+        return True
+    except (ValueError, TypeError, AttributeError):
         return False
 
+# Load data from Bronze
 rows = session.execute("SELECT * FROM cancer_patients_raw")
 
 batch = BatchStatement()
 batch_size = 100
-count = 0
+valid_count = 0
+invalid_count = 0
 
+# Filter, deduplicate, and insert
+seen_ids = set()
 for row in rows:
-    if is_valid(row):
+    if is_valid(row) and row.patient_id not in seen_ids:
         values = (
-            row.patient_id, row.age, row.gender, row.country_region, row.year,
-            row.genetic_risk, row.air_pollution, row.alcohol_use, row.smoking, row.obesity_level,
-            row.cancer_type, row.cancer_stage, row.treatment_cost_usd, row.survival_years, row.target_severity_score
+            row.patient_id, row.cancer_type, row.country_region, row.gender,
+            row.survival_years, row.target_severity_score
         )
         batch.add(insert_stmt, values)
-        count += 1
+        seen_ids.add(row.patient_id)
+        valid_count += 1
 
-        if count % batch_size == 0:
+        if valid_count % batch_size == 0:
             session.execute(batch)
             batch.clear()
+    else:
+        invalid_count += 1
 
 # Insert remaining
 if batch:
     session.execute(batch)
 
-print(f"✅ Cleaned and validated {count} rows inserted into clean table.")
+print(f"{valid_count} valid rows inserted into clean Silver table.")
+print(f"{invalid_count} invalid or duplicate rows skipped.")
+
+
 
 
 # 1.Average Severity by Cancer Type (Line Graph)
